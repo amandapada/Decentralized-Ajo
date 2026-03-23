@@ -11,6 +11,11 @@ pub enum AjoError {
     InvalidInput = 4,
     AlreadyPaid = 5,
     InsufficientFunds = 6,
+    VoteAlreadyActive = 7,
+    NoActiveVote = 8,
+    AlreadyVoted = 9,
+    CircleNotActive = 10,
+    CircleAlreadyDissolved = 11,
 }
 
 #[contracttype]
@@ -34,10 +39,33 @@ pub struct MemberData {
     pub status: u32, // 0 = Active, 1 = Inactive, 2 = Exited
 }
 
+/// Circle lifecycle status
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CircleStatus {
+    Active,
+    VotingForDissolution,
+    Dissolved,
+}
+
+/// Tracks an in-progress dissolution vote
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DissolutionVote {
+    pub votes_for: u32,
+    pub total_members: u32,
+    /// Threshold mode: 0 = simple majority (>50%), 1 = supermajority (>66%)
+    pub threshold_mode: u32,
+}
+
 #[contracttype]
 pub enum DataKey {
     Circle,
     Members,
+    CircleStatus,
+    DissolutionVote,
+    /// Tracks which members have already voted (stored as Map<Address, bool>)
+    VoteCast,
 }
 
 #[contract]
@@ -249,5 +277,175 @@ impl AjoCircle {
         }
 
         Ok(members_vec)
+    }
+
+    // ─── Dissolution Voting ───────────────────────────────────────────────────
+
+    /// Start a dissolution vote. Any active member or the organizer may call this.
+    /// `threshold_mode`: 0 = simple majority (>50%), 1 = supermajority (>66%).
+    pub fn start_dissolution_vote(
+        env: Env,
+        caller: Address,
+        threshold_mode: u32,
+    ) -> Result<(), AjoError> {
+        caller.require_auth();
+
+        if threshold_mode > 1 {
+            return Err(AjoError::InvalidInput);
+        }
+
+        // Circle must exist and be active
+        let circle: CircleData = env.storage()
+            .instance()
+            .get(&DataKey::Circle)
+            .ok_or(AjoError::NotFound)?;
+
+        let status: CircleStatus = env.storage()
+            .instance()
+            .get(&DataKey::CircleStatus)
+            .unwrap_or(CircleStatus::Active);
+
+        match status {
+            CircleStatus::Dissolved => return Err(AjoError::CircleAlreadyDissolved),
+            CircleStatus::VotingForDissolution => return Err(AjoError::VoteAlreadyActive),
+            CircleStatus::Active => {}
+        }
+
+        // Caller must be a member or the organizer
+        let members: Map<Address, MemberData> = env.storage()
+            .instance()
+            .get(&DataKey::Members)
+            .ok_or(AjoError::NotFound)?;
+
+        if !members.contains_key(caller.clone()) && circle.organizer != caller {
+            return Err(AjoError::Unauthorized);
+        }
+
+        let vote = DissolutionVote {
+            votes_for: 0,
+            total_members: circle.member_count,
+            threshold_mode,
+        };
+
+        env.storage().instance().set(&DataKey::CircleStatus, &CircleStatus::VotingForDissolution);
+        env.storage().instance().set(&DataKey::DissolutionVote, &vote);
+        env.storage().instance().set(&DataKey::VoteCast, &Map::<Address, bool>::new(&env));
+
+        Ok(())
+    }
+
+    /// Cast a YES vote for dissolution. Each member may vote once.
+    /// If the threshold is reached the circle status flips to Dissolved automatically.
+    pub fn vote_to_dissolve(env: Env, member: Address) -> Result<(), AjoError> {
+        member.require_auth();
+
+        let status: CircleStatus = env.storage()
+            .instance()
+            .get(&DataKey::CircleStatus)
+            .unwrap_or(CircleStatus::Active);
+
+        if status != CircleStatus::VotingForDissolution {
+            return Err(AjoError::NoActiveVote);
+        }
+
+        // Caller must be a registered member
+        let members: Map<Address, MemberData> = env.storage()
+            .instance()
+            .get(&DataKey::Members)
+            .ok_or(AjoError::NotFound)?;
+
+        if !members.contains_key(member.clone()) {
+            return Err(AjoError::Unauthorized);
+        }
+
+        // Prevent double-voting
+        let mut vote_cast: Map<Address, bool> = env.storage()
+            .instance()
+            .get(&DataKey::VoteCast)
+            .unwrap_or_else(|| Map::new(&env));
+
+        if vote_cast.get(member.clone()).unwrap_or(false) {
+            return Err(AjoError::AlreadyVoted);
+        }
+
+        vote_cast.set(member.clone(), true);
+        env.storage().instance().set(&DataKey::VoteCast, &vote_cast);
+
+        let mut vote: DissolutionVote = env.storage()
+            .instance()
+            .get(&DataKey::DissolutionVote)
+            .ok_or(AjoError::NoActiveVote)?;
+
+        vote.votes_for += 1;
+
+        // Check threshold
+        let threshold_met = if vote.threshold_mode == 1 {
+            // Supermajority: strictly more than 66%
+            vote.votes_for * 100 > vote.total_members * 66
+        } else {
+            // Simple majority: strictly more than 50%
+            vote.votes_for * 2 > vote.total_members
+        };
+
+        if threshold_met {
+            env.storage().instance().set(&DataKey::CircleStatus, &CircleStatus::Dissolved);
+        }
+
+        env.storage().instance().set(&DataKey::DissolutionVote, &vote);
+
+        Ok(())
+    }
+
+    /// Distribute funds back to members proportional to their contributions.
+    /// Can only be called after the circle has been dissolved via voting.
+    /// Returns the refund amount for the calling member.
+    pub fn dissolve_and_refund(env: Env, member: Address) -> Result<i128, AjoError> {
+        member.require_auth();
+
+        let status: CircleStatus = env.storage()
+            .instance()
+            .get(&DataKey::CircleStatus)
+            .unwrap_or(CircleStatus::Active);
+
+        if status != CircleStatus::Dissolved {
+            return Err(AjoError::CircleNotActive);
+        }
+
+        let mut members: Map<Address, MemberData> = env.storage()
+            .instance()
+            .get(&DataKey::Members)
+            .ok_or(AjoError::NotFound)?;
+
+        let mut member_data = members.get(member.clone()).ok_or(AjoError::NotFound)?;
+
+        // Refund = what they put in minus what they already took out
+        let refund = member_data.total_contributed - member_data.total_withdrawn;
+
+        if refund <= 0 {
+            return Err(AjoError::InsufficientFunds);
+        }
+
+        member_data.total_withdrawn += refund;
+        member_data.status = 2; // Exited
+        members.set(member, member_data);
+        env.storage().instance().set(&DataKey::Members, &members);
+
+        Ok(refund)
+    }
+
+    /// Get the current circle status
+    pub fn get_circle_status(env: Env) -> CircleStatus {
+        env.storage()
+            .instance()
+            .get(&DataKey::CircleStatus)
+            .unwrap_or(CircleStatus::Active)
+    }
+
+    /// Get the current dissolution vote state (if any)
+    pub fn get_dissolution_vote(env: Env) -> Result<DissolutionVote, AjoError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::DissolutionVote)
+            .ok_or(AjoError::NoActiveVote)
     }
 }

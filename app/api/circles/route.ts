@@ -1,172 +1,85 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { verifyToken, extractToken } from '@/lib/auth';
+import { validateBody, applyRateLimit } from '@/lib/api-helpers';
+import { CreateCircleSchema } from '@/lib/validations/circle';
+import type { CreateCircleInput } from '@/lib/validations/circle';
+import { RATE_LIMITS } from '@/lib/rate-limit';
 
-// POST - Create a new circle
 export async function POST(request: NextRequest) {
+  const token = extractToken(request.headers.get('authorization'));
+  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const payload = verifyToken(token);
+  if (!payload) return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 });
+
+  const rateLimited = applyRateLimit(request, RATE_LIMITS.api, 'circles:create', payload.userId);
+  if (rateLimited) return rateLimited;
+
+  const validated = await validateBody(request, CreateCircleSchema);
+  if (validated.error) return validated.error;
+  const data = validated.data as CreateCircleInput;
+
   try {
-    const authHeader = request.headers.get('authorization');
-    const token = extractToken(authHeader);
-
-    if (!token) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-
-    const payload = verifyToken(token);
-    if (!payload) {
-      return NextResponse.json(
-        { error: 'Invalid or expired token' },
-        { status: 401 }
-      );
-    }
-
-    const body = await request.json();
-    const {
-      name,
-      description,
-      contributionAmount,
-      contributionFrequencyDays,
-      maxRounds,
-    } = body;
-
-    // Validate inputs
-    if (!name || contributionAmount <= 0 || contributionFrequencyDays <= 0 || maxRounds <= 0) {
-      return NextResponse.json(
-        { error: 'Invalid input parameters' },
-        { status: 400 }
-      );
-    }
-
-    // Create circle
     const circle = await prisma.circle.create({
       data: {
-        name,
-        description,
+        name: data.name,
+        description: data.description,
         organizerId: payload.userId,
-        contributionAmount,
-        contributionFrequencyDays,
-        maxRounds,
+        contributionAmount: data.contributionAmount,
+        contributionFrequencyDays: data.contributionFrequencyDays,
+        maxRounds: data.maxRounds,
       },
       include: {
-        organizer: {
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
+        organizer: { select: { id: true, email: true, firstName: true, lastName: true } },
         members: true,
       },
     });
 
-    // Add organizer as first member
     await prisma.circleMember.create({
-      data: {
-        circleId: circle.id,
-        userId: payload.userId,
-        rotationOrder: 1,
-      },
+      data: { circleId: circle.id, userId: payload.userId, rotationOrder: 1 },
     });
 
-    return NextResponse.json(
-      {
-        success: true,
-        circle,
-      },
-      { status: 201 }
-    );
-  } catch (error) {
-    console.error('Create circle error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: true, circle }, { status: 201 });
+  } catch (err) {
+    console.error('Create circle error:', err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
-// GET - List circles
 export async function GET(request: NextRequest) {
+  const token = extractToken(request.headers.get('authorization'));
+  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const payload = verifyToken(token);
+  if (!payload) return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 });
+
+  const rateLimited = applyRateLimit(request, RATE_LIMITS.api, 'circles:list', payload.userId);
+  if (rateLimited) return rateLimited;
+
   try {
-    const authHeader = request.headers.get('authorization');
-    const token = extractToken(authHeader);
-
-    if (!token) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-
-    const payload = verifyToken(token);
-    if (!payload) {
-      return NextResponse.json(
-        { error: 'Invalid or expired token' },
-        { status: 401 }
-      );
-    }
-
-    // Get user's circles (as member or organizer)
     const circles = await prisma.circle.findMany({
       where: {
         OR: [
           { organizerId: payload.userId },
-          {
-            members: {
-              some: {
-                userId: payload.userId,
-              },
-            },
-          },
+          { members: { some: { userId: payload.userId } } },
         ],
       },
       include: {
-        organizer: {
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
+        organizer: { select: { id: true, email: true, firstName: true, lastName: true } },
         members: {
           include: {
-            user: {
-              select: {
-                id: true,
-                email: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
+            user: { select: { id: true, email: true, firstName: true, lastName: true } },
           },
         },
-        contributions: {
-          select: {
-            amount: true,
-          },
-        },
+        contributions: { select: { amount: true } },
       },
-      orderBy: {
-        createdAt: 'desc',
-      },
+      orderBy: { createdAt: 'desc' },
     });
 
-    return NextResponse.json(
-      {
-        success: true,
-        circles,
-      },
-      { status: 200 }
-    );
-  } catch (error) {
-    console.error('List circles error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: true, circles }, { status: 200 });
+  } catch (err) {
+    console.error('List circles error:', err);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
