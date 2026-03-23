@@ -71,6 +71,8 @@ pub enum DataKey {
     DissolutionVote,
     /// Tracks which members have already voted (stored as Map<Address, bool>)
     VoteCast,
+    /// Shuffled payout rotation order
+    RotationOrder,
 }
 
 #[contract]
@@ -219,6 +221,60 @@ impl AjoCircle {
         Ok(())
     }
 
+    /// Shuffle the payout rotation order using ledger sequence as seed (Fisher-Yates).
+    /// Must be called by the organizer before the first round begins.
+    pub fn shuffle_rotation(env: Env, organizer: Address) -> Result<(), AjoError> {
+        organizer.require_auth();
+
+        let circle: CircleData = env.storage()
+            .instance()
+            .get(&DataKey::Circle)
+            .ok_or(AjoError::NotFound)?;
+
+        if circle.organizer != organizer {
+            return Err(AjoError::Unauthorized);
+        }
+
+        let members: Map<Address, MemberData> = env.storage()
+            .instance()
+            .get(&DataKey::Members)
+            .ok_or(AjoError::NotFound)?;
+
+        // Build ordered list from current members
+        let mut rotation: Vec<Address> = Vec::new(&env);
+        for (addr, _) in members.iter() {
+            rotation.push_back(addr);
+        }
+
+        let n = rotation.len();
+        if n < 2 {
+            env.storage().instance().set(&DataKey::RotationOrder, &rotation);
+            return Ok(());
+        }
+
+        // Seed: mix ledger sequence with tx hash bytes for unpredictability
+        let ledger_seq = env.ledger().sequence();
+        let tx_hash: BytesN<32> = env.crypto().sha256(
+            &soroban_sdk::Bytes::from_slice(&env, &ledger_seq.to_be_bytes())
+        ).into();
+        let hash_bytes = tx_hash.to_array();
+
+        // Fisher-Yates shuffle — seed advances through hash bytes cyclically
+        for i in (1..n).rev() {
+            let byte_idx = (i as usize) % 32;
+            let j = (hash_bytes[byte_idx] as u32) % (i + 1);
+            // Swap rotation[i] and rotation[j]
+            let a = rotation.get(i).unwrap();
+            let b = rotation.get(j).unwrap();
+            rotation.set(i, b);
+            rotation.set(j, a);
+        }
+
+        env.storage().instance().set(&DataKey::RotationOrder, &rotation);
+
+        Ok(())
+    }
+
     /// Claim payout when it's a member's turn
     pub fn claim_payout(env: Env, member: Address) -> Result<i128, AjoError> {
         member.require_auth();
@@ -234,6 +290,19 @@ impl AjoCircle {
             .instance()
             .get(&DataKey::Members)
             .ok_or(AjoError::NotFound)?;
+
+        // Enforce rotation order if a shuffle has been committed
+        if let Some(rotation) = env.storage()
+            .instance()
+            .get::<DataKey, Vec<Address>>(&DataKey::RotationOrder)
+        {
+            // Current round is 1-based; index into rotation is (current_round - 1)
+            let idx = (circle.current_round - 1) as u32;
+            let expected = rotation.get(idx).ok_or(AjoError::InvalidInput)?;
+            if expected != member {
+                return Err(AjoError::Unauthorized);
+            }
+        }
 
         if let Some(mut member_data) = members.get(member.clone()) {
             if member_data.has_received_payout {
