@@ -14,13 +14,14 @@ pub enum AjoError {
     InvalidInput = 4,
     AlreadyPaid = 5,
     InsufficientFunds = 6,
-    VoteAlreadyActive = 7,
-    NoActiveVote = 8,
-    AlreadyVoted = 9,
-    CircleNotActive = 10,
-    CircleAlreadyDissolved = 11,
-    CircleAtCapacity = 12,
-    CirclePanicked = 13,
+    Disqualified = 7,
+    VoteAlreadyActive = 8,
+    NoActiveVote = 9,
+    AlreadyVoted = 10,
+    CircleNotActive = 11,
+    CircleAlreadyDissolved = 12,
+    CircleAtCapacity = 13,
+    CirclePanicked = 14,
 }
 
 #[contracttype]
@@ -67,9 +68,17 @@ pub struct DissolutionVote {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberStanding {
+    pub missed_count: u32,
+    pub is_active: bool,
+}
+
+#[contracttype]
 pub enum DataKey {
     Circle,
     Members,
+    Standings,
     CircleStatus,
     DissolutionVote,
     /// Tracks which members have already voted (stored as Map<Address, bool>)
@@ -133,7 +142,7 @@ impl AjoCircle {
         members.set(
             organizer.clone(),
             MemberData {
-                address: organizer,
+                address: organizer.clone(),
                 total_contributed: 0,
                 total_withdrawn: 0,
                 has_received_payout: false,
@@ -142,6 +151,16 @@ impl AjoCircle {
         );
 
         env.storage().instance().set(&DataKey::Members, &members);
+
+        let mut standings: Map<Address, MemberStanding> = Map::new(&env);
+        standings.set(
+            organizer.clone(),
+            MemberStanding {
+                missed_count: 0,
+                is_active: true,
+            },
+        );
+        env.storage().instance().set(&DataKey::Standings, &standings);
 
         Ok(())
     }
@@ -187,7 +206,7 @@ impl AjoCircle {
         members.set(
             new_member.clone(),
             MemberData {
-                address: new_member,
+                address: new_member.clone(),
                 total_contributed: 0,
                 total_withdrawn: 0,
                 has_received_payout: false,
@@ -200,8 +219,22 @@ impl AjoCircle {
             .checked_add(1)
             .ok_or(AjoError::InvalidInput)?;
 
+        let mut standings: Map<Address, MemberStanding> = env.storage()
+            .instance()
+            .get(&DataKey::Standings)
+            .unwrap_or(Map::new(&env));
+        
+        standings.set(
+            new_member.clone(),
+            MemberStanding {
+                missed_count: 0,
+                is_active: true,
+            },
+        );
+
         env.storage().instance().set(&DataKey::Members, &members);
         env.storage().instance().set(&DataKey::Circle, &circle);
+        env.storage().instance().set(&DataKey::Standings, &standings);
 
         Ok(())
     }
@@ -229,6 +262,27 @@ impl AjoCircle {
             .instance()
             .get(&DataKey::Circle)
             .ok_or(AjoError::NotFound)?;
+
+        let mut standings: Map<Address, MemberStanding> = env.storage()
+            .instance()
+            .get(&DataKey::Standings)
+            .unwrap_or(Map::new(&env));
+
+        if let Some(mut standing) = standings.get(member.clone()) {
+            if standing.missed_count >= 3 {
+                panic!("Member disqualified due to inactivity.");
+            }
+            if !standing.is_active {
+                return Err(AjoError::Disqualified);
+            }
+            // Reset missed count on successful contribution
+            standing.missed_count = 0;
+            standings.set(member.clone(), standing);
+        } else {
+            return Err(AjoError::NotFound);
+        }
+
+        env.storage().instance().set(&DataKey::Standings, &standings);
 
         let mut members: Map<Address, MemberData> = env
             .storage()
@@ -323,6 +377,37 @@ impl AjoCircle {
         Ok(())
     }
 
+    /// Slash a member for missing a contribution round
+    pub fn slash_member(env: Env, organizer: Address, member: Address) -> Result<(), AjoError> {
+        organizer.require_auth();
+
+        let circle: CircleData = env.storage()
+            .instance()
+            .get(&DataKey::Circle)
+            .ok_or(AjoError::NotFound)?;
+
+        if circle.organizer != organizer {
+            return Err(AjoError::Unauthorized);
+        }
+
+        let mut standings: Map<Address, MemberStanding> = env.storage()
+            .instance()
+            .get(&DataKey::Standings)
+            .unwrap_or(Map::new(&env));
+
+        if let Some(mut standing) = standings.get(member.clone()) {
+            standing.missed_count += 1;
+            if standing.missed_count >= 3 {
+                standing.is_active = false;
+            }
+            standings.set(member.clone(), standing);
+            env.storage().instance().set(&DataKey::Standings, &standings);
+            Ok(())
+        } else {
+            Err(AjoError::NotFound)
+        }
+    }
+
     /// Claim payout when it's a member's turn
     pub fn claim_payout(env: Env, member: Address) -> Result<i128, AjoError> {
         member.require_auth();
@@ -337,6 +422,17 @@ impl AjoCircle {
             .instance()
             .get(&DataKey::Circle)
             .ok_or(AjoError::NotFound)?;
+
+        let standings: Map<Address, MemberStanding> = env.storage()
+            .instance()
+            .get(&DataKey::Standings)
+            .unwrap_or(Map::new(&env));
+
+        if let Some(standing) = standings.get(member.clone()) {
+            if !standing.is_active {
+                return Err(AjoError::Disqualified);
+            }
+        }
 
         let mut members: Map<Address, MemberData> = env
             .storage()
@@ -909,3 +1005,6 @@ mod tests {
         assert_eq!(result, Err(AjoError::CirclePanicked));
     }
 }
+
+#[cfg(test)]
+mod test;
