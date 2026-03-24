@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ArrowLeft, Users, TrendingUp, Calendar, Send } from 'lucide-react';
 import { toast } from 'sonner';
 import { authenticatedFetch } from '@/lib/auth-client';
+import { AdminPanel } from './components/admin-panel';
 
 interface Member {
   id: string;
@@ -261,11 +262,12 @@ export default function CircleDetailPage() {
 
         {/* Tabs */}
         <Tabs defaultValue="overview" className="w-full">
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className={`grid w-full ${isOrganizer ? 'grid-cols-5' : 'grid-cols-4'}`}>
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="members">Members</TabsTrigger>
             <TabsTrigger value="contributions">Contributions</TabsTrigger>
             <TabsTrigger value="governance">Governance</TabsTrigger>
+            {isOrganizer && <TabsTrigger value="admin">Admin</TabsTrigger>}
           </TabsList>
 
           {/* Overview Tab */}
@@ -445,6 +447,18 @@ export default function CircleDetailPage() {
               </CardContent>
             </Card>
           </TabsContent>
+
+          {/* Admin Tab - Only visible to organizer */}
+          {isOrganizer && (
+            <TabsContent value="admin">
+              <AdminPanel
+                circleId={circle.id}
+                circle={circle}
+                currentUserId={currentUser?.id}
+                onUpdate={fetchCircle}
+              />
+            </TabsContent>
+          )}
         </Tabs>
       </div>
     </main>
