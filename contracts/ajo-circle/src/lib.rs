@@ -16,7 +16,7 @@
 
 pub mod factory;
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Map, Vec};
 
 /// Default maximum number of members allowed in a circle
 const MAX_MEMBERS: u32 = 50;
@@ -659,6 +659,12 @@ impl AjoCircle {
                 .set(&DataKey::RoundDeadline, &next_deadline);
         }
 
+        // Emit DepositReceived event
+        env.events().publish(
+            (symbol_short!("deposit"), member.clone()),
+            (amount, circle.current_round)
+        );
+
         Ok(())
     }
 
@@ -940,6 +946,12 @@ impl AjoCircle {
             // INTERACTIONS: External call happens LAST
             let token_client = token::Client::new(&env, &circle.token_address);
             token_client.transfer(&env.current_contract_address(), &member, &payout);
+
+            // Emit FundsWithdrawn event
+            env.events().publish(
+                (symbol_short!("withdraw"), member.clone()),
+                (payout, circle.current_round)
+            );
 
             Ok(payout)
         } else {
