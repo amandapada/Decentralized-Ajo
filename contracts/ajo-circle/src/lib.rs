@@ -16,6 +16,9 @@
 
 pub mod factory;
 
+#[cfg(test)]
+mod deposit_tests;
+
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Map, Vec};
 
 /// Default maximum number of members allowed in a circle
