@@ -75,6 +75,7 @@ pub enum DataKey {
     RoundDeadline,
     RoundContribCount,
     TotalPool,
+    LastDepositAt,
 }
 
 #[contract]
@@ -82,19 +83,10 @@ pub struct AjoCircle;
 
 #[contractimpl]
 impl AjoCircle {
-    /// Verify that the caller is the circle administrator
     fn require_admin(env: &Env, admin: &Address) -> Result<(), AjoError> {
         admin.require_auth();
-
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(AjoError::NotFound)?;
-
-        if stored_admin != *admin {
-            return Err(AjoError::Unauthorized);
-        }
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(AjoError::NotFound)?;
+        if stored_admin != *admin { return Err(AjoError::Unauthorized); }
         Ok(())
     }
 
@@ -108,9 +100,9 @@ impl AjoCircle {
         max_members: u32,
     ) -> Result<(), AjoError> {
         organizer.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &organizer);
 
         let configured_max_members = if max_members == 0 { MAX_MEMBERS } else { max_members };
-
         if contribution_amount <= 0 || frequency_days == 0 || max_rounds == 0 || configured_max_members > HARD_CAP {
             return Err(AjoError::InvalidInput);
         }
@@ -127,26 +119,42 @@ impl AjoCircle {
         };
 
         env.storage().instance().set(&DataKey::Circle, &circle_data);
-        env.storage().instance().set(&DataKey::Admin, &organizer);
         env.storage().instance().set(&DataKey::RoundContribCount, &0_u32);
-
         let deadline = env.ledger().timestamp() + (frequency_days as u64) * 86_400;
         env.storage().instance().set(&DataKey::RoundDeadline, &deadline);
 
         let mut members: Map<Address, MemberData> = Map::new(&env);
-        members.set(organizer.clone(), MemberData {
-            address: organizer.clone(),
-            total_contributed: 0,
-            total_withdrawn: 0,
-            has_received_payout: false,
-            status: 0,
-        });
+        members.set(organizer.clone(), MemberData { address: organizer.clone(), total_contributed: 0, total_withdrawn: 0, has_received_payout: false, status: 0 });
         env.storage().instance().set(&DataKey::Members, &members);
 
         let mut standings: Map<Address, MemberStanding> = Map::new(&env);
         standings.set(organizer.clone(), MemberStanding { missed_count: 0, is_active: true });
         env.storage().instance().set(&DataKey::Standings, &standings);
 
+        Ok(())
+    }
+
+    pub fn contribute(env: Env, member: Address, amount: i128) -> Result<(), AjoError> {
+        member.require_auth();
+        let mut circle: CircleData = env.storage().instance().get(&DataKey::Circle).ok_or(AjoError::NotFound)?;
+        let mut members: Map<Address, MemberData> = env.storage().instance().get(&DataKey::Members).ok_or(AjoError::NotFound)?;
+        let mut member_data = members.get(member.clone()).ok_or(AjoError::NotFound)?;
+
+        let token_client = token::Client::new(&env, &circle.token_address);
+        token_client.transfer(&member, &env.current_contract_address(), &amount);
+
+        member_data.total_contributed += amount;
+        members.set(member, member_data);
+        env.storage().instance().set(&DataKey::Members, &members);
+        Ok(())
+    }
+
+    pub fn shuffle_rotation(env: Env, organizer: Address) -> Result<(), AjoError> {
+        organizer.require_auth();
+        let members: Map<Address, MemberData> = env.storage().instance().get(&DataKey::Members).ok_or(AjoError::NotFound)?;
+        let mut rotation: Vec<Address> = Vec::new(&env);
+        for (addr, _) in members.iter() { rotation.push_back(addr); }
+        env.storage().instance().set(&DataKey::RotationOrder, &rotation);
         Ok(())
     }
 
@@ -167,7 +175,7 @@ impl AjoCircle {
             env.storage().instance().set(&DataKey::Standings, &standings);
             Ok(())
         } else {
-            return Err(AjoError::NotFound);
+            Err(AjoError::NotFound)
         }
     }
 }
