@@ -13,7 +13,7 @@ datasource db {
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
-  password  String
+  password  String?
   address   String   @unique
   
   // Wallet info
@@ -380,21 +380,21 @@ enum NotificationType {
 }
 
 model AjoGroup {
-  id              String    @id @default(uuid())
-  contractAddress String    @unique
+  id              String   @id @default(uuid())
+  contractAddress String   @unique
   name            String
-  contributionAmt String    
-  cycleDuration   Int       
-  maxMembers      Int       
-  status          String    @default("OPEN")
+  description     String?
+  creatorAddress  String
+  status          String   @default("OPEN")
+  maxMembers      Int
+  createdAt       DateTime @default(now())
   members         UserAjo[]
 }
 
 model UserAjo {
   userAddress String
   ajoId       String
-  user        User      @relation(fields: [userAddress], references: [address], onDelete: Cascade)
-  ajo         AjoGroup  @relation(fields: [ajoId], references: [id], onDelete: Cascade)
+  ajo         AjoGroup @relation(fields: [ajoId], references: [id], onDelete: Cascade)
 
   @@id([userAddress, ajoId])
   @@index([userAddress])

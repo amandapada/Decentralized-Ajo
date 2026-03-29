@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "test": "npm run test:contracts && npm run test:unit",
     "test:unit": "jest --runInBand",
+    "test:api": "jest --runInBand --selectProjects api",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
@@ -56,6 +57,8 @@
     "@stellar/stellar-base": "^14.1.0",
     "@stellar/stellar-sdk": "^14.1.0",
     "@tanstack/react-query": "^5.95.2",
+    "@upstash/queue": "^1.0.1",
+    "@upstash/redis": "^1.37.0",
     "@vercel/analytics": "1.6.1",
     "autoprefixer": "^10.4.20",
     "bcryptjs": "^2.4.3",
@@ -69,6 +72,7 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "input-otp": "1.4.2",
+    "ioredis": "^5.3.2",
     "js-sha256": "^0.11.1",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^0.564.0",
@@ -93,6 +97,8 @@
     "vaul": "^1.1.2",
     "viem": "^2.47.6",
     "wagmi": "^3.6.0",
+    "siwe": "^2.2.0",
+    "ethers": "^5.7.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {
